@@ -39,12 +39,7 @@ DEFAULT_ANALYSED_MOVES = 20
 MATE_SCORE = 100000
 BLUNDER_THRESHOLD_CP = 300
 
-# Controls how quickly candidate quality falls as the
-# centipawn loss increases.
 CANDIDATE_QUALITY_SCALE_CP = 200
-
-# Candidate moves at or above this quality are counted as
-# good alternatives.
 GOOD_MOVE_QUALITY_THRESHOLD = 70.0
 
 
@@ -75,11 +70,9 @@ def find_stockfish():
     ]
 
     for path in possible_paths:
-        if not path:
-            continue
-
-        if os.path.exists(path) and os.access(path, os.X_OK):
-            return path
+        if path and os.path.exists(path):
+            if os.access(path, os.X_OK):
+                return path
 
     return None
 
@@ -123,17 +116,17 @@ def score_description(score, colour):
     return f"{centipawn_score / 100:+.2f}"
 
 
-def calculate_accuracy_score(engine_rank, analysed_moves):
+def calculate_move_rank(engine_rank, analysed_moves):
     if engine_rank is None:
-        return 0
+        return analysed_moves + 1
 
     if engine_rank < 1:
-        return 0
+        return analysed_moves + 1
 
     if engine_rank > analysed_moves:
-        return 0
+        return analysed_moves + 1
 
-    return analysed_moves + 1 - engine_rank
+    return engine_rank
 
 
 def calculate_candidate_quality(
@@ -329,7 +322,7 @@ def analyse_single_move(
         best_score_cp - played_score_cp,
     )
 
-    accuracy_score = calculate_accuracy_score(
+    move_rank = calculate_move_rank(
         engine_rank,
         analysed_moves,
     )
@@ -375,9 +368,6 @@ def analyse_single_move(
             ),
         })
 
-    # If the played move was outside the returned MultiPV
-    # lines, append it so that it still appears in the
-    # candidate chart.
     if played_move_line is None:
         try:
             played_move_san = board.san(
@@ -394,9 +384,7 @@ def analyse_single_move(
         candidate_rows.append({
             "candidate_rank": None,
             "candidate_move": played_move_san,
-            "candidate_move_uci": (
-                played_move.uci()
-            ),
+            "candidate_move_uci": played_move.uci(),
             "candidate_evaluation": (
                 played_evaluation
             ),
@@ -425,7 +413,7 @@ def analyse_single_move(
     )
 
     return {
-        "accuracy_score": accuracy_score,
+        "move_rank": move_rank,
         "engine_rank": engine_rank,
         "is_in_analysed_moves": (
             engine_rank is not None
@@ -458,7 +446,6 @@ def display_metric_cards(
     metadata,
 ):
     analysis_scope = metadata["analysis_scope"]
-    analysed_moves = metadata["analysed_moves"]
 
     metric_definitions = []
 
@@ -489,8 +476,8 @@ def display_metric_cards(
             colour_rows["is_blunder"].sum()
         )
 
-        average_score = colour_rows[
-            "accuracy_score"
+        average_rank = colour_rows[
+            "move_rank"
         ].mean()
 
         metric_definitions.append(
@@ -502,11 +489,8 @@ def display_metric_cards(
 
         metric_definitions.append(
             (
-                f"{player_name} Avg Score",
-                (
-                    f"{average_score:.2f} / "
-                    f"{analysed_moves}"
-                ),
+                f"{player_name} Avg Rank",
+                f"{average_rank:.2f}",
             )
         )
 
@@ -529,11 +513,11 @@ def display_metric_cards(
         )
 
 
-def display_accuracy_chart(
+def display_rank_chart(
     results_df,
     metadata,
 ):
-    st.subheader("Move Accuracy Plot")
+    st.subheader("Move Rank Plot")
 
     analysed_moves = metadata["analysed_moves"]
     analysis_scope = metadata["analysis_scope"]
@@ -556,7 +540,7 @@ def display_accuracy_chart(
     if not white_moves.empty:
         axis.plot(
             white_moves["move_number"],
-            white_moves["accuracy_score"],
+            white_moves["move_rank"],
             marker="o",
             linewidth=1.5,
             label=f"White: {white_player}",
@@ -566,7 +550,7 @@ def display_accuracy_chart(
     if not black_moves.empty:
         axis.plot(
             black_moves["move_number"],
-            black_moves["accuracy_score"],
+            black_moves["move_rank"],
             marker="s",
             linewidth=1.5,
             label=f"Black: {black_player}",
@@ -580,7 +564,7 @@ def display_accuracy_chart(
     if not blunders.empty:
         axis.scatter(
             blunders["move_number"],
-            blunders["accuracy_score"],
+            blunders["move_rank"],
             color="red",
             marker="x",
             s=150,
@@ -599,18 +583,21 @@ def display_accuracy_chart(
                     f"{row['move_number']}..."
                 )
 
+            evaluation_loss = row[
+                "evaluation_loss_pawns"
+            ]
+
             annotation = (
                 f"{move_prefix}"
                 f"{row['Played Move']}\n"
-                f"Loss: "
-                f"{row['evaluation_loss_pawns']:.2f}"
+                f"Loss: {evaluation_loss:.2f}"
             )
 
             axis.annotate(
                 annotation,
                 (
                     row["move_number"],
-                    row["accuracy_score"],
+                    row["move_rank"],
                 ),
                 xytext=(5, 10),
                 textcoords="offset points",
@@ -631,29 +618,53 @@ def display_accuracy_chart(
     )
 
     axis.set_xlabel("Game move number")
-    axis.set_ylabel("Move score")
 
-    maximum_score = max(
-        1,
-        analysed_moves,
+    axis.set_ylabel(
+        "Engine move rank (1 = best)"
     )
 
-    axis.set_ylim(
-        -0.35,
-        maximum_score + 0.35,
-    )
+    outside_rank = analysed_moves + 1
 
     tick_interval = max(
         1,
-        math.ceil(maximum_score / 10),
+        math.ceil(analysed_moves / 10),
     )
 
-    axis.set_yticks(
+    rank_ticks = list(
         range(
-            0,
-            maximum_score + 1,
+            1,
+            analysed_moves + 1,
             tick_interval,
         )
+    )
+
+    if analysed_moves not in rank_ticks:
+        rank_ticks.append(analysed_moves)
+
+    if outside_rank not in rank_ticks:
+        rank_ticks.append(outside_rank)
+
+    rank_ticks = sorted(set(rank_ticks))
+
+    rank_labels = []
+
+    for rank_value in rank_ticks:
+        if rank_value <= analysed_moves:
+            rank_labels.append(
+                str(rank_value)
+            )
+        else:
+            rank_labels.append(
+                f">{analysed_moves}"
+            )
+
+    axis.set_yticks(rank_ticks)
+    axis.set_yticklabels(rank_labels)
+
+    # Reversed limits put rank 1 at the top.
+    axis.set_ylim(
+        outside_rank + 0.5,
+        0.5,
     )
 
     axis.grid(
@@ -820,10 +831,11 @@ def display_candidate_chart(
     selected_candidates = (
         selected_candidates.sort_values(
             by=[
-                "candidate_quality",
+                "candidate_rank",
                 "candidate_score_cp",
             ],
-            ascending=[True, True],
+            ascending=[False, True],
+            na_position="first",
         ).reset_index(drop=True)
     )
 
@@ -1036,8 +1048,9 @@ def display_candidate_chart(
 
     candidate_detail_df = (
         candidate_detail_df.sort_values(
-            by="Quality (%)",
-            ascending=False,
+            by="Rank",
+            ascending=True,
+            na_position="last",
         )
     )
 
@@ -1127,7 +1140,7 @@ def display_saved_results():
         metadata,
     )
 
-    display_accuracy_chart(
+    display_rank_chart(
         results_df,
         metadata,
     )
@@ -1522,9 +1535,9 @@ if run_analysis:
                                         "Engine Rank": (
                                             engine_rank_display
                                         ),
-                                        "accuracy_score": (
+                                        "move_rank": (
                                             analysis[
-                                                "accuracy_score"
+                                                "move_rank"
                                             ]
                                         ),
                                         "evaluation_loss_pawns": (
@@ -1632,8 +1645,7 @@ if run_analysis:
                                     engine.quit()
                                 except (
                                     chess.engine.EngineError,
-                                    chess.engine
-                                    .EngineTerminatedError,
+                                    chess.engine.EngineTerminatedError,
                                     OSError,
                                 ):
                                     pass
